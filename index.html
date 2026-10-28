@@ -316,6 +316,9 @@ body.web-on .web-only{display:inline-flex!important}
 .az-samples{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
 .az-samples .btn{font-family:var(--f-read);font-size:17px}
 @media (max-width:820px){.az-grid{grid-template-columns:1fr}}
+.feedback.check{background:var(--gold-soft)}
+.word-big.pick span{cursor:pointer;border-radius:8px;transition:background .15s}
+.word-big.pick span:hover{background:var(--gold-soft);color:var(--gold)}
 .toast{position:fixed;bottom:calc(20px + env(safe-area-inset-bottom,0px));left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:9px 16px;border-radius:10px;font-size:14px;z-index:30;opacity:0;transition:opacity .2s;pointer-events:none}
 .toast.show{opacity:1}
 
@@ -570,17 +573,34 @@ function deviceSpeak(text,rate,onend){
 const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
 let micBlocked=!SR;
 function blockMic(reason){micBlocked=true;render();if(reason)toast(reason);}
+let LAST_TAKE=null;
+function harakaName(seg){
+  if(!seg)return "";
+  const sh=seg.includes("\u0651");
+  const v=seg.includes("\u064B")?"تنوين الفتح":seg.includes("\u064C")?"تنوين الضم":seg.includes("\u064D")?"تنوين الكسر":seg.includes("\u064E")?"الفتحة":seg.includes("\u064F")?"الضمة":seg.includes("\u0650")?"الكسرة":seg.includes("\u0652")?"السكون":"";
+  if(sh)return v&&v!=="السكون"?"الشدة مع "+v:"الشدة";
+  if(v)return v;
+  if("اويى".includes(seg[0]))return "المد";
+  return "";
+}
 function listenOnce(onResult,onState){
   if(micBlocked)return;
   let rec;try{rec=new SR();}catch(e){blockMic("التعرّف على الكلام غير متاح هنا");return;}
   rec.lang=prefs.srLang;rec.interimResults=false;rec.maxAlternatives=5;rec.continuous=false;
   let got=false;
+  let mr=null,chunks=[],stream=null,stopped=false;
+  const canTape=navigator.mediaDevices&&window.MediaRecorder&&!/Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  if(canTape)navigator.mediaDevices.getUserMedia({audio:true}).then(st=>{stream=st;if(stopped){st.getTracks().forEach(t=>t.stop());return;}
+    mr=new MediaRecorder(st);mr.ondataavailable=e=>chunks.push(e.data);
+    mr.onstop=()=>{st.getTracks().forEach(t=>t.stop());if(chunks.length){if(LAST_TAKE)URL.revokeObjectURL(LAST_TAKE);LAST_TAKE=URL.createObjectURL(new Blob(chunks,{type:mr.mimeType}));const pb=document.getElementById("playMine");if(pb)pb.hidden=false;}};
+    mr.start();}).catch(()=>{});
+  const stopTape=()=>{stopped=true;setTimeout(()=>{try{if(mr&&mr.state==="recording")mr.stop();else if(stream)stream.getTracks().forEach(t=>t.stop());}catch(e){}},250);};
   rec.onresult=e=>{got=true;const r=e.results[0];const alts=[];for(let i=0;i<r.length;i++)alts.push(r[i].transcript);onResult(alts);};
-  rec.onerror=e=>{onState(false);
+  rec.onerror=e=>{onState(false);stopTape();
     if(e.error==="not-allowed"||e.error==="service-not-allowed")blockMic("الميكروفون غير مسموح به في هذه الصفحة، فتحوّل الموقع إلى التقييم الذاتي");
     else if(e.error==="no-speech")toast("لم يُسمع صوت، اقترب من الميكروفون وحاول مرة أخرى");
     else if(e.error==="network")toast("التعرّف على الكلام يحتاج اتصالًا بالإنترنت");};
-  rec.onend=()=>{onState(false);if(!got)return;};
+  rec.onend=()=>{onState(false);stopTape();if(!got)return;};
   try{rec.start();onState(true);}catch(e){blockMic("تعذّر تشغيل الميكروفون");}
   return rec;
 }
@@ -777,7 +797,7 @@ function showResult(it,alts,les,u){
   const wb=$("#wordBig");
   wb.innerHTML=ev.segs.map((s,i)=>`<span class="${ev.segState[i]==="bad"?"seg-bad":(ev.score>=.99?"seg-ok":"")}">${esc(s)}</span>`).join("");
   let cls,title,body="";
-  if(ev.score>=.99){cls="good";title="ممتاز! نطق صحيح";mark(2);body=`<div class="tip">انتقل إلى الكلمة التالية، أو أعدها لتثبيتها.</div>`;}
+  if(ev.score>=.99){harakatStep(it,ev,fb,wb);return;}
   else if(ev.score>=.7){cls="close";title="قريب جدًّا، صحّح الحرف المظلَّل";mark(1,ev.subs);}
   else{cls="bad";title="أعد المحاولة بعد الاستماع ببطء";mark(1,ev.subs);}
   if(ev.score<.99){
@@ -789,12 +809,57 @@ function showResult(it,alts,les,u){
   }
   fb.className="feedback show "+cls;
   fb.innerHTML=`<div class="fb-title">${title}</div><div class="fb-heard">سمعتُ: <span>${esc(ev.heard||"—")}</span> · نسبة التطابق ${ar(Math.round(Math.max(0,ev.score)*100))}٪</div>${body}
-   <div class="tip muted" style="font-size:12.5px">ملاحظة: التعرّف الآلي يتحقق من الحروف، أما الحركات القصيرة فيتحقق منها المعلم بالسماع.</div>
+   <div class="tip muted" style="font-size:12.5px">ملاحظة: التعرّف الآلي يتحقق من الحروف فقط، ولذلك تُراجَع الحركات في خطوة ثانية بعد صحة الحروف.</div>
    ${ev.score<.99?`<button class="btn ai-only" id="whyBtn" style="margin-top:10px">${IC.spark} لماذا أخطأت؟ اسأل المعلم الذكي</button>`:""}`;
   const why=$("#whyBtn");
   if(why)why.onclick=()=>askAI(`${SYS}\nطالب في المرحلة المتوسطة حاول قراءة «${it.t}» (درس ${les.title}) فكتب نظام التعرّف الآلي على الكلام ما سمعه: «${ev.heard}».\nفي ثلاث نقاط قصيرة: ما الخطأ المحتمل في نطقه، وكيف يصححه (مخرج الحرف ووضع اللسان والشفتين)، وتمرين قصير من كلمتين مشكولتين للتدريب. نبّه بلطف إن كان الفرق قد يعود إلى خطأ في التعرّف الآلي نفسه.`,$("#aiBox"));
 }
 
+/* step 2: letters are right — confirm the short vowels (harakat) by ear */
+function harakatStep(it,ev,fb,wb){
+  const segSpans=()=>[...wb.querySelectorAll("span")];
+  fb.className="feedback show check";
+  fb.innerHTML=`<div class="fb-title">الحروف صحيحة ✓ بقي التأكد من الحركات</div>
+    <div class="tip">التعرّف الآلي لا يميّز الحركات (الفتحة والضمة والكسرة والسكون والشدة)، فقارن نطقك بالنطق الصحيح ثم اختر بأمانة. ويمكن للمعلم أن يحكم إن كان بجانبك.</div>
+    <div class="self-row" style="justify-content:flex-start">
+      <button class="btn sm" id="hModel">${IC.play} النطق الصحيح ببطء</button>
+      <button class="btn sm" id="playMine" ${LAST_TAKE?"":"hidden"}>${IC.play} استمع إلى نطقك</button>
+    </div>
+    <div class="self-row" style="justify-content:flex-start">
+      <button class="btn green" id="hOk">الحركات صحيحة</button>
+      <button class="btn" id="hBad">أخطأتُ في حركة</button>
+    </div>`;
+  $("#hModel").onclick=()=>speak(it.t,prefs.slow);
+  $("#playMine").onclick=()=>{if(!LAST_TAKE)return;stopAudio();const a=new Audio(LAST_TAKE);curAudio=a;a.play().catch(()=>{});};
+  $("#hOk").onclick=()=>{mark(2);fb.className="feedback show good";fb.innerHTML=`<div class="fb-title">ممتاز! نطق صحيح بالحروف والحركات</div><div class="tip">انتقل إلى الكلمة التالية، أو أعدها لتثبيتها.</div>`;};
+  $("#hBad").onclick=()=>{
+    fb.className="feedback show close";
+    fb.innerHTML=`<div class="fb-title">انقر على الحرف الذي أخطأت في حركته</div><div class="tip">الحروف قابلة للنقر في الكلمة الكبيرة أعلاه.</div>`;
+    wb.classList.add("pick");
+    segSpans().forEach((sp,i)=>{sp.classList.remove("seg-ok");sp.onclick=()=>{
+      wb.classList.remove("pick");segSpans().forEach(x=>x.onclick=null);sp.classList.add("seg-bad");
+      const seg=ev.segs[i];const h=harakaName(seg);const base=norm(seg)||seg[0];
+      const s=stu();if(!s.harakat)s.harakat={};if(h)s.harakat[h]=(s.harakat[h]||0)+1;mark(1);
+      fb.innerHTML=`<div class="fb-title">حرف ${esc(NAMES[base]||base)} هنا بـ${h||"حركته المكتوبة"}: <span style="font-family:var(--f-read);font-size:26px">${esc(seg)}</span></div>
+        <div class="tip">${h?HARAKA_TIP[h.replace("الشدة مع ","")]||HARAKA_TIP[h]||"":""}</div>
+        <div class="self-row" style="justify-content:flex-start"><button class="btn sm" id="hSeg">${IC.play} استمع إلى المقطع</button><button class="btn sm" id="hModel2">${IC.play} استمع إلى الكلمة ببطء</button></div>
+        <div class="tip">استمع، ثم اضغط زر الميكروفون وأعد قراءة الكلمة.</div>`;
+      const sy=syllables(it.t).find(x=>x.includes(seg))||seg;
+      $("#hSeg").onclick=()=>speak(sy,prefs.slow);$("#hModel2").onclick=()=>speak(it.t,prefs.slow);
+    };});
+  };
+}
+const HARAKA_TIP={
+ "الفتحة":"الفتحة: افتح فمك قليلًا وانطق صوتًا قصيرًا مثل أوّل «بَ».",
+ "الكسرة":"الكسرة: اخفض فكّك وانطق صوتًا قصيرًا مثل أوّل «بِ»، دون أن تمدّه ياءً.",
+ "الضمة":"الضمة: ضمّ شفتيك ضمًّا خفيفًا وانطق صوتًا قصيرًا مثل أوّل «بُ»، دون أن تمدّه واوًا.",
+ "السكون":"السكون: انطق الحرف ثابتًا دون أي حركة بعده، مثل الباء في «أَبْ».",
+ "الشدة":"الشدة: الحرف المشدد حرفان؛ الأول ساكن والثاني متحرك، فاضغط عليه قليلًا مثل «رَبّ».",
+ "تنوين الفتح":"تنوين الفتح: فتحة ثم نون ساكنة تُنطق ولا تُكتب: «كِتَابًا» = كِتَابَنْ.",
+ "تنوين الضم":"تنوين الضم: ضمة ثم نون ساكنة: «كِتَابٌ» = كِتَابُنْ.",
+ "تنوين الكسر":"تنوين الكسر: كسرة ثم نون ساكنة: «كِتَابٍ» = كِتَابِنْ.",
+ "المد":"المد: أطل الصوت بمقدار حركتين، لا أكثر ولا أقل."
+};
 /* record & playback (works where microphone is allowed) */
 function setupRecorder(){
   const col=$("#recCol");if(!col||micBlocked||!navigator.mediaDevices||!window.MediaRecorder)return;
@@ -933,6 +998,7 @@ function renderReport(v){
     <div class="stat"><b>${ar(tried)}</b><span>كلمة تدرّب عليها</span></div>
     <div class="stat"><b>${ar(Object.keys(s.passages).length)}</b><span>نصًّا قاس فيه طلاقته</span></div>
   </div>
+  ${Object.keys(s.harakat||{}).length?`<section class="card" style="margin-bottom:18px"><h3 style="margin-bottom:8px">الحركات الأكثر خطأ</h3><div class="letter-chips">${Object.entries(s.harakat).sort((a,b)=>b[1]-a[1]).map(([h,n])=>`<span class="lc">${esc(h)}<small>${ar(n)} مرة</small></span>`).join("")}</div></section>`:""}
   <div class="two">
     <section class="card"><h3 style="margin-bottom:8px">الحروف الأكثر حاجة إلى تدريب</h3>
       ${subs.length?`<div class="letter-chips">${subs.map(([c,n])=>`<span class="lc">${NAMES[c]||c}<small>${ar(n)} مرة</small></span>`).join("")}</div><p class="muted" style="font-size:13px;margin-bottom:0">مستخرجة من محاولات التصحيح الآلي. ابدأ بها في حصة العلاج القادمة، وارجع إلى درس «الحروف المتشابهة نطقًا».</p>`:`<p class="muted" style="margin:0">لا توجد بيانات بعد. تظهر هنا الحروف التي يخطئ فيها الطالب عند استخدام التصحيح الآلي.</p>`}
@@ -1448,9 +1514,9 @@ function renderSession(v){
       <div class="gprog"><i style="width:${Math.round(G.i/n*100)}%"></i></div>
       <div class="ghearts" aria-label="القلوب المتبقية ${G.hearts}">${[0,1,2].map(k=>`<span class="${k<G.hearts?"on":""}">${GI.heart}</span>`).join("")}</div></div>
     <div class="gq"><h3 class="gprompt">${prompts[q.kind]}</h3>${body}</div>
-    <div class="gbar ${G.state==="ok"?"ok":G.state==="bad"?"bad":""}">
-      <div class="gbar-msg">${G.state==="ok"?`<b>أحسنت!</b> <span>+${ar(10)} نقاط</span>`:G.state==="bad"?`<b>الإجابة الصحيحة:</b> <span class="ans">${esc(q.kind==="letter"?q.item.letter:q.t)}</span>`:q.kind==="speak"?`<button class="btn sm ghost" id="qSkip">لا أستطيع التحدث الآن</button>`:""}</div>
-      ${G.state==="ask"?(q.kind==="speak"?"":`<button class="btn primary gbtn" id="gCheck" ${canCheck?"":"disabled"}>تحقّق</button>`):`<button class="btn gbtn ${G.state==="ok"?"green":"primary"}" id="gNext">متابعة</button>`}
+    <div class="gbar ${G.state==="ok"?"ok":G.state==="bad"?"bad":G.state==="confirm"?"ok":""}">
+      <div class="gbar-msg">${G.state==="confirm"?`<b>الحروف صحيحة.</b> <span>هل كانت الحركات صحيحة؟</span> <button class="btn sm ghost" id="qModel">${IC.play} النطق الصحيح</button>`:G.state==="ok"?`<b>أحسنت!</b> <span>+${ar(10)} نقاط</span>`:G.state==="bad"?`<b>الإجابة الصحيحة:</b> <span class="ans">${esc(q.kind==="letter"?q.item.letter:q.t)}</span>`:q.kind==="speak"?`<button class="btn sm ghost" id="qSkip">لا أستطيع التحدث الآن</button>`:""}</div>
+      ${G.state==="confirm"?`<span style="display:flex;gap:8px"><button class="btn gbtn green" id="hYes">نعم، صحيحة</button><button class="btn gbtn" id="hNo">أخطأت في حركة</button></span>`:G.state==="ask"?(q.kind==="speak"?"":`<button class="btn primary gbtn" id="gCheck" ${canCheck?"":"disabled"}>تحقّق</button>`):`<button class="btn gbtn ${G.state==="ok"?"green":"primary"}" id="gNext">متابعة</button>`}
     </div></div>`;
   const $q=s=>v.querySelector(s);
   if($q("#qPlay"))$q("#qPlay").onclick=()=>speak(q.t,prefs.rate);
@@ -1465,9 +1531,10 @@ function renderSession(v){
     if($q("#qSkip"))$q("#qSkip").onclick=()=>{G.qs.splice(G.i,1);if(G.i>=G.qs.length)finish();render();setTimeout(autoPlay,200);};
     if($q("#qMic"))$q("#qMic").onclick=()=>{const mb=$q("#qMic");
       if(activeRec){try{activeRec.stop()}catch(e){}return;}stopAudio();
-      activeRec=listenOnce(alts=>{const ev=evaluate(q.t,alts);$q("#qHeard").textContent="سمعتُ: "+(ev.heard||"—");grade(ev.score>=.75,v);},on=>{mb.classList.toggle("listening",on);if(!on)activeRec=null;});
+      activeRec=listenOnce(alts=>{const ev=evaluate(q.t,alts);$q("#qHeard").textContent="سمعتُ: "+(ev.heard||"—");if(ev.score>=.99){G.state="confirm";renderSession(v);}else grade(false,v);},on=>{mb.classList.toggle("listening",on);if(!on)activeRec=null;});
       if(micBlocked){G.qs.splice(G.i,1);if(G.i>=G.qs.length)finish();render();}};
-  }else $q("#gNext").onclick=()=>next();
+  }else if(G.state==="confirm"){$q("#qModel").onclick=()=>speak(q.t,prefs.slow);$q("#hYes").onclick=()=>{G.state="ask";grade(true,v);};$q("#hNo").onclick=()=>{G.state="ask";const s=stu();if(!s.harakat)s.harakat={};s.harakat["غير محدد"]=(s.harakat["غير محدد"]||0)+1;grade(false,v);};}
+  else $q("#gNext").onclick=()=>next();
 }
 function check(v){const q=G.qs[G.i];let ok;
   if(q.kind==="build")ok=G.built.map(p=>q.pool[p].s).join(/\s/.test(q.t.trim())?" ":"")===q.tiles.join(/\s/.test(q.t.trim())?" ":"");
@@ -1586,7 +1653,7 @@ function studentSummary(){
   const passages={};Object.entries(s.passages||{}).forEach(([k,p])=>passages[k]={wcpm:p.wcpm,acc:p.acc});
   const subs={};Object.entries(s.subs||{}).sort((a,b)=>b[1]-a[1]).slice(0,10).forEach(([c,v])=>subs[c]=v);
   const g=s.game||{xp:0,levels:{},streak:{count:0,last:""}};
-  return {name:n,grade:s.cls.grade,sec:String(s.cls.sec),teacher:s.cls.teacher||"",mastered,tried,xp:g.xp||0,streak:streakNow(gstate()),levels:Object.keys(g.levels||{}).length,passages,subs,lessons,updatedAt:firebase.firestore.FieldValue.serverTimestamp()};
+  return {name:n,grade:s.cls.grade,sec:String(s.cls.sec),teacher:s.cls.teacher||"",mastered,tried,xp:g.xp||0,streak:streakNow(gstate()),levels:Object.keys(g.levels||{}).length,passages,subs,harakat:Object.assign({},s.harakat||{}),lessons,updatedAt:firebase.firestore.FieldValue.serverTimestamp()};
 }
 async function syncStudent(){
   if(!FB||!FBUSER||!FBUSER.isAnonymous||!isRegistered())return;
@@ -1673,7 +1740,8 @@ async function renderWebAdmin(v){
       <label class="field">المعلم المشرف<input class="input" id="fT" value="${esc(dashF.teacher)}" placeholder="الكل"></label>
     </div>
     <div class="tbl" id="sTable"><p class="muted">جارٍ تحميل النتائج…</p></div></section>
-  <section class="card" style="margin-top:18px"><h3 style="margin-bottom:8px">الحروف الأكثر خطأ (للطلاب المعروضين)</h3><div class="letter-chips" id="subsBox"></div></section>`;
+  <section class="card" style="margin-top:18px"><h3 style="margin-bottom:8px">الحروف الأكثر خطأ (للطلاب المعروضين)</h3><div class="letter-chips" id="subsBox"></div>
+    <h3 style="margin:16px 0 8px">الحركات الأكثر خطأ</h3><div class="letter-chips" id="harBox"></div></section>`;
   const load=async(force)=>{
     try{if(force||!STU_CACHE){const snap=await FB.db.collection("students").get();STU_CACHE=[];snap.forEach(d=>STU_CACHE.push(Object.assign({id:d.id},d.data())));}}
     catch(e){$("#sTable").innerHTML=`<p class="muted">${fbErr(e)}</p>`;return;}
@@ -1698,6 +1766,9 @@ async function renderWebAdmin(v){
     const agg={};list.forEach(s=>Object.entries(s.subs||{}).forEach(([c,n])=>agg[c]=(agg[c]||0)+n));
     const top=Object.entries(agg).sort((a,b)=>b[1]-a[1]).slice(0,10);
     $("#subsBox").innerHTML=top.length?top.map(([c,n])=>`<span class="lc">${NAMES[c]||esc(c)}<small>${ar(n)} مرة</small></span>`).join(""):`<p class="muted" style="margin:0">لا توجد بيانات بعد.</p>`;
+    const hg={};list.forEach(s=>Object.entries(s.harakat||{}).forEach(([c,n])=>hg[c]=(hg[c]||0)+n));
+    const ht=Object.entries(hg).sort((a,b)=>b[1]-a[1]);
+    $("#harBox").innerHTML=ht.length?ht.map(([c,n])=>`<span class="lc">${esc(c)}<small>${ar(n)} مرة</small></span>`).join(""):`<p class="muted" style="margin:0">لا توجد بيانات بعد.</p>`;
   };
   const drawUsers=async(force)=>{
     try{if(force||!USERS_CACHE){const snap=await FB.db.collection("users").get();USERS_CACHE=[];snap.forEach(d=>USERS_CACHE.push(Object.assign({uid:d.id},d.data())));}}catch(e){$("#uList").innerHTML=`<p class="muted">${fbErr(e)}</p>`;return;}
