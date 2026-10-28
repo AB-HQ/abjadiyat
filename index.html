@@ -1751,80 +1751,121 @@ async function renderWebAdmin(v){
   load(false);
 }
 
-/* ================= Professional voice generator (Azure Neural TTS, admin only) ================= */
+/* ================= Professional voice generator (admin only) ================= */
 const AZ_VOICES=[
  {id:"ar-SA-HamedNeural",label:"حامد — فصحى، صوت رجل (موصى به)"},
  {id:"ar-SA-ZariyahNeural",label:"زارية — فصحى، صوت امرأة"},
  {id:"ar-AE-HamdanNeural",label:"حمدان — إماراتي، صوت رجل"},
  {id:"ar-QA-MoazNeural",label:"معاذ — قطري، صوت رجل"},
- {id:"ar-JO-TaimNeural",label:"تيم — أردني، صوت رجل"},
  {id:"ar-EG-ShakirNeural",label:"شاكر — مصري، صوت رجل"}
 ];
-const AZ_SAMPLES=["سَيْف","صَيْف","قَطَّعَ","الشَّمْسُ","ظَمَأٌ","سَامِي يَزُورُ أَقَارِبَهُ وَيُسَاعِدُ جِيرَانَهُ."];
-const az={key:"",region:"uaenorth",voice:"ar-SA-HamedNeural",rate:-8,pack:null,running:false,stop:false};
+const EL_MODELS=[
+ {id:"eleven_multilingual_v2",label:"Multilingual v2 — أعلى جودة (حرف = رصيد واحد)"},
+ {id:"eleven_flash_v2_5",label:"Flash v2.5 — أسرع وأرخص (حرف = نصف رصيد)"}
+];
+const AZ_SAMPLES=["سَيْف","صَيْف","قَطَّعَ","الشَّمْسُ","سَامِي يَزُورُ أَقَارِبَهُ وَيُسَاعِدُ جِيرَانَهُ."];
+const az={provider:"eleven",key:"",region:"uaenorth",voice:"ar-SA-HamedNeural",rate:-8,
+  elVoice:"",elModel:"eleven_multilingual_v2",elSpeed:0.9,elVoices:[],skipSyl:true,pack:null,running:false,stop:false};
 function xmlEsc(t){return t.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
-async function azSynth(text){
-  const ssml=`<speak version="1.0" xml:lang="ar-SA" xmlns="http://www.w3.org/2001/10/synthesis"><voice name="${az.voice}"><prosody rate="${az.rate}%">${xmlEsc(text)}</prosody></voice></speak>`;
-  const r=await fetch(`https://${az.region}.tts.speech.microsoft.com/cognitiveservices/v1`,{method:"POST",headers:{"Ocp-Apim-Subscription-Key":az.key,"Content-Type":"application/ssml+xml","X-Microsoft-OutputFormat":"audio-24khz-48kbitrate-mono-mp3"},body:ssml});
-  if(!r.ok){const e=new Error("http "+r.status);e.status=r.status;throw e;}
-  const buf=new Uint8Array(await r.arrayBuffer());let bin="";for(let i=0;i<buf.length;i+=0x8000)bin+=String.fromCharCode.apply(null,buf.subarray(i,i+0x8000));
-  return btoa(bin);
+function b64FromBuf(buf){const u=new Uint8Array(buf);let bin="";for(let i=0;i<u.length;i+=0x8000)bin+=String.fromCharCode.apply(null,u.subarray(i,i+0x8000));return btoa(bin);}
+async function ttsSynth(text){
+  if(az.provider==="azure"){
+    const ssml=`<speak version="1.0" xml:lang="ar-SA" xmlns="http://www.w3.org/2001/10/synthesis"><voice name="${az.voice}"><prosody rate="${az.rate}%">${xmlEsc(text)}</prosody></voice></speak>`;
+    const r=await fetch(`https://${az.region}.tts.speech.microsoft.com/cognitiveservices/v1`,{method:"POST",headers:{"Ocp-Apim-Subscription-Key":az.key,"Content-Type":"application/ssml+xml","X-Microsoft-OutputFormat":"audio-24khz-48kbitrate-mono-mp3"},body:ssml});
+    if(!r.ok){const e=new Error("http "+r.status);e.status=r.status;throw e;}
+    return b64FromBuf(await r.arrayBuffer());
+  }
+  const r=await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(az.elVoice)}?output_format=mp3_22050_32`,{method:"POST",
+    headers:{"xi-api-key":az.key,"Content-Type":"application/json","Accept":"audio/mpeg"},
+    body:JSON.stringify({text,model_id:az.elModel,language_code:az.elModel==="eleven_flash_v2_5"?"ar":undefined,voice_settings:{stability:0.6,similarity_boost:0.8,style:0,use_speaker_boost:true,speed:az.elSpeed}})});
+  if(!r.ok){let detail="";try{const j=await r.json();detail=JSON.stringify(j.detail||j);}catch(e){}const e=new Error("http "+r.status);e.status=r.status;e.detail=detail;throw e;}
+  return b64FromBuf(await r.arrayBuffer());
 }
-function azErr(e){const s=e&&e.status;
-  if(s===401||s===403)return "المفتاح أو المنطقة غير صحيحة. انسخ المفتاح (KEY 1) والمنطقة (Location/Region) من صفحة مورد Speech في Azure.";
-  if(s===429)return "تجاوزت الحد المسموح مؤقتًا، انتظر دقيقة ثم أكمل.";
-  if(s===400)return "رفض Azure الطلب. تأكد من اختيار صوت متاح.";
-  return "تعذّر الاتصال بـ Azure. تحقق من المنطقة والإنترنت.";}
+function ttsErr(e){const s=e&&e.status,d=(e&&e.detail)||"";
+  if(/quota|credit/i.test(d))return "نفد رصيد ElevenLabs لهذا الشهر. ما وُلّد محفوظ؛ يمكنك تنزيل الحزمة الآن وإكمال الباقي لاحقًا.";
+  if(s===401||s===403)return az.provider==="azure"?"المفتاح أو المنطقة غير صحيحة.":"مفتاح ElevenLabs غير صحيح، أو لا يملك صلاحية «Text to Speech». أنشئ مفتاحًا جديدًا وفعّل له هذه الصلاحية.";
+  if(s===429)return "طلبات كثيرة في وقت قصير. انتظر دقيقة ثم أكمل.";
+  if(s===400||s===422)return "رفضت الخدمة الطلب. تأكد من اختيار صوت متاح في حسابك."+(d?" ("+d.slice(0,120)+")":"");
+  return "تعذّر الاتصال بالخدمة. تحقق من الإنترنت.";}
+function ttsList(){const all=allTexts();let list=all.filter(x=>!(az.skipSyl&&x.kind==="مقطع صوتي")).map(x=>x.t);list.push("أَبْجَدِيَّات");return list;}
 function renderTTS(box){
   if(!box)return;
-  const total=allTexts().length+1;
+  const el=az.provider==="eleven";
   box.innerHTML=`<section class="card" style="margin-top:18px">
-    <h3 style="margin-bottom:4px">الصوت الاحترافي (Microsoft Azure)</h3>
-    <p class="muted" style="font-size:13.5px;margin:0 0 12px">ولّد كل تسجيلات الموقع (${ar(total)} مقطعًا) بصوت عربي فصيح عالي الجودة. المفتاح يُستخدم في هذه الصفحة فقط ولا يُحفظ في أي مكان.</p>
-    <div class="az-grid">
-      <label class="field">مفتاح Speech (KEY 1)<input class="input" id="azKey" type="password" dir="ltr" autocomplete="off" placeholder="الصق المفتاح هنا"></label>
-      <label class="field">المنطقة (Region)<input class="input" id="azRegion" dir="ltr" value="${esc(az.region)}" placeholder="uaenorth"></label>
+    <h3 style="margin-bottom:4px">الصوت الاحترافي</h3>
+    <p class="muted" style="font-size:13.5px;margin:0 0 12px">ولّد تسجيلات الموقع بصوت عربي فصيح عالي الجودة. المفتاح يُستخدم في هذه الصفحة فقط ولا يُحفظ في أي مكان.</p>
+    <div class="seg-ctl" role="group" aria-label="الخدمة" style="margin-bottom:12px"><button id="pvEl" aria-pressed="${el}">ElevenLabs</button><button id="pvAz" aria-pressed="${!el}">Microsoft Azure</button></div>
+    ${el?`<div class="az-grid">
+      <label class="field">مفتاح ElevenLabs (API Key)<input class="input" id="azKey" type="password" dir="ltr" autocomplete="off" placeholder="sk_..." value=""></label>
+      <label class="field">&nbsp;<button class="btn" id="elLoad" type="button">تحميل الأصوات والرصيد</button></label>
+      <label class="field">الصوت<select class="input" id="elVoice">${az.elVoices.length?az.elVoices.map(v=>`<option value="${esc(v.id)}" ${v.id===az.elVoice?"selected":""}>${esc(v.name)}</option>`).join(""):`<option value="">حمّل الأصوات أولًا</option>`}</select></label>
+      <label class="field">النموذج<select class="input" id="elModel">${EL_MODELS.map(m=>`<option value="${m.id}" ${m.id===az.elModel?"selected":""}>${m.label}</option>`).join("")}</select></label>
+      <label class="field">سرعة القراءة: <span id="elSpV">${ar(az.elSpeed.toFixed(2))}</span><input type="range" id="elSp" min="0.7" max="1.1" step="0.05" value="${az.elSpeed}"></label>
+    </div><div class="muted" id="elInfo" style="font-size:13px;margin-top:8px"></div>`
+    :`<div class="az-grid">
+      <label class="field">مفتاح Speech (KEY 1)<input class="input" id="azKey" type="password" dir="ltr" autocomplete="off"></label>
+      <label class="field">المنطقة (Region)<input class="input" id="azRegion" dir="ltr" value="${esc(az.region)}"></label>
       <label class="field">الصوت<select class="input" id="azVoice">${AZ_VOICES.map(v=>`<option value="${v.id}" ${v.id===az.voice?"selected":""}>${v.label}</option>`).join("")}</select></label>
       <label class="field">سرعة القراءة: <span id="azRateV">${ar(az.rate)}٪</span><input type="range" id="azRate" min="-30" max="10" step="2" value="${az.rate}"></label>
-    </div>
+    </div>`}
+    <label style="display:flex;gap:8px;align-items:center;font-size:13.5px;margin-top:10px"><input type="checkbox" id="skipSyl" ${az.skipSyl?"checked":""}> تخطّي المقاطع المنفردة (مثل «سَيْ») وإبقاء صوتها الحالي — يوفّر نحو ٢٠٪ من الرصيد</label>
+    <div class="muted" id="azCount" style="font-size:13px;margin-top:4px"></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
       <button class="btn" id="azTry">استمع إلى عيّنات</button>
       <button class="btn primary" id="azRun">توليد كل التسجيلات</button>
       <button class="btn" id="azStop" hidden>إيقاف</button>
-      <button class="btn green" id="azDl" hidden>تنزيل حزمة الأصوات</button>
+      <button class="btn green" id="azDl" ${az.pack?"":"hidden"}>تنزيل حزمة الأصوات</button>
     </div>
     <div class="az-samples" id="azSamples"></div>
     <div id="azProg" hidden style="margin-top:12px"><div class="goal-bar"><i id="azBar" style="width:0%"></i></div><div class="muted" id="azTxt" style="font-size:13px;margin-top:6px"></div></div>
     <div class="muted" id="azMsg" style="font-size:13px;margin-top:8px"></div>
   </section>`;
   const msg=t=>$("#azMsg").textContent=t;
-  const read=()=>{az.key=$("#azKey").value.trim();az.region=$("#azRegion").value.trim().toLowerCase().replace(/\s+/g,"");az.voice=$("#azVoice").value;};
-  $("#azRate").oninput=e=>{az.rate=+e.target.value;$("#azRateV").textContent=ar(az.rate)+"٪";};
-  $("#azTry").onclick=async()=>{read();if(!az.key){msg("الصق مفتاح Speech أولًا.");return;}
-    msg("جارٍ توليد العيّنات…");const box2=$("#azSamples");box2.innerHTML="";
-    try{for(const t of AZ_SAMPLES){const b=await azSynth(t);const btn=document.createElement("button");btn.className="btn sm";btn.innerHTML=IC.play+" ";btn.append(t);btn.onclick=()=>playData({b64:b,mime:"audio/mpeg"});box2.appendChild(btn);}
-      msg("استمع إلى العيّنات. إن أعجبك الصوت اضغط «توليد كل التسجيلات».");box2.firstChild&&box2.firstChild.click();}
-    catch(e){msg(azErr(e));}};
+  const keyIn=$("#azKey");if(az.key)keyIn.value=az.key;
+  const count=()=>{const l=ttsList();const chars=l.reduce((a,t)=>a+t.length,0);const credits=az.provider==="eleven"?Math.ceil(chars*(az.elModel==="eleven_flash_v2_5"?0.5:1)):chars;
+    $("#azCount").textContent=`سيُولَّد ${ar(l.length)} تسجيلًا (${ar(chars)} حرفًا${az.provider==="eleven"?`، نحو ${ar(credits)} رصيدًا`:""}).`;};count();
+  const read=()=>{az.key=keyIn.value.trim();if(az.provider==="azure"){az.region=$("#azRegion").value.trim().toLowerCase().replace(/\s+/g,"");az.voice=$("#azVoice").value;}else{az.elVoice=$("#elVoice").value;az.elModel=$("#elModel").value;}};
+  $("#pvEl").onclick=()=>{read();az.provider="eleven";renderTTS(box);};
+  $("#pvAz").onclick=()=>{read();az.provider="azure";renderTTS(box);};
+  $("#skipSyl").onchange=e=>{az.skipSyl=e.target.checked;count();};
+  if(el){
+    $("#elSp").oninput=e=>{az.elSpeed=+e.target.value;$("#elSpV").textContent=ar(az.elSpeed.toFixed(2));};
+    $("#elModel").onchange=e=>{az.elModel=e.target.value;count();};
+    $("#elLoad").onclick=async()=>{read();if(!az.key){msg("الصق مفتاح ElevenLabs أولًا.");return;}
+      msg("جارٍ التحميل…");
+      try{const r=await fetch("https://api.elevenlabs.io/v1/voices",{headers:{"xi-api-key":az.key}});if(!r.ok){const e=new Error();e.status=r.status;throw e;}
+        const j=await r.json();az.elVoices=(j.voices||[]).map(v=>({id:v.voice_id,name:v.name+(v.labels&&(v.labels.accent||v.labels.language)?" — "+(v.labels.accent||v.labels.language):"")+(v.category==="premade"?"":" ★")}));
+        const arabic=az.elVoices.find(v=>/arab|عرب|★/i.test(v.name));if(!az.elVoice&&az.elVoices.length)az.elVoice=(arabic||az.elVoices[0]).id;
+        let info="";try{const s=await fetch("https://api.elevenlabs.io/v1/user/subscription",{headers:{"xi-api-key":az.key}});if(s.ok){const sj=await s.json();info=`الرصيد المتبقي هذا الشهر: ${ar((sj.character_limit||0)-(sj.character_count||0))} من ${ar(sj.character_limit||0)}.`;}}catch(e){}
+        renderTTS(box);$("#elInfo").textContent=info+" الأصوات المعلَّمة بنجمة ★ هي التي أضفتها من مكتبة الأصوات.";msg(az.elVoices.length?"اختر صوتًا ثم استمع إلى العيّنات.":"لا توجد أصوات في حسابك.");}
+      catch(e){msg(ttsErr(e));}};
+  }else{
+    $("#azRate").oninput=e=>{az.rate=+e.target.value;$("#azRateV").textContent=ar(az.rate)+"٪";};
+  }
+  $("#azTry").onclick=async()=>{read();if(!az.key){msg("الصق المفتاح أولًا.");return;}if(el&&!az.elVoice){msg("اضغط «تحميل الأصوات والرصيد» واختر صوتًا.");return;}
+    msg("جارٍ توليد العيّنات…");const b2=$("#azSamples");b2.innerHTML="";
+    try{for(const t of AZ_SAMPLES){const b=await ttsSynth(t);const btn=document.createElement("button");btn.className="btn sm";btn.innerHTML=IC.play+" ";btn.append(t);btn.onclick=()=>playData({b64:b,mime:"audio/mpeg"});b2.appendChild(btn);}
+      msg("استمع إلى العيّنات. إن أعجبك الصوت اضغط «توليد كل التسجيلات».");b2.firstChild&&b2.firstChild.click();}
+    catch(e){msg(ttsErr(e));}};
   $("#azStop").onclick=()=>{az.stop=true;};
-  $("#azRun").onclick=async()=>{read();if(!az.key){msg("الصق مفتاح Speech أولًا.");return;}if(az.running)return;
-    const list=allTexts().map(x=>x.t);list.push("أَبْجَدِيَّات");
-    const items=(az.pack&&az.pack.voice===az.voice&&az.pack.rate===az.rate)?az.pack.items:{};
+  $("#azRun").onclick=async()=>{read();if(!az.key){msg("الصق المفتاح أولًا.");return;}if(el&&!az.elVoice){msg("اضغط «تحميل الأصوات والرصيد» واختر صوتًا.");return;}if(az.running)return;
+    const sig=az.provider+"|"+(el?az.elVoice+az.elModel+az.elSpeed:az.voice+az.rate);
+    const list=ttsList();const items=(az.pack&&az.pack.sig===sig)?az.pack.items:{};
     az.running=true;az.stop=false;$("#azRun").disabled=true;$("#azStop").hidden=false;$("#azProg").hidden=false;msg("");
-    let done=Object.keys(items).length,fail=0;const todo=list.filter(t=>!items[t]);
+    let done=list.filter(t=>items[t]).length,fail=0;const todo=list.filter(t=>!items[t]);
     const upd=()=>{$("#azBar").style.width=Math.round(done/list.length*100)+"%";$("#azTxt").textContent=`تم ${ar(done)} من ${ar(list.length)}${fail?` · تعذّر ${ar(fail)}`:""}`;};upd();
     let idx=0,fatal=null;
     const worker=async()=>{while(idx<todo.length&&!az.stop&&!fatal){const t=todo[idx++];
-      for(let attempt=0;attempt<4;attempt++){try{items[t]=await azSynth(t);done++;break;}
-        catch(e){if(e.status===401||e.status===403){fatal=e;break;}if(e.status===429||!e.status){await new Promise(r=>setTimeout(r,1500*(attempt+1)));continue;}fail++;break;}}
+      for(let attempt=0;attempt<4;attempt++){try{items[t]=await ttsSynth(t);done++;break;}
+        catch(e){if(e.status===401||e.status===403||/quota|credit/i.test(e.detail||"")){fatal=e;break;}if(e.status===429||!e.status){await new Promise(r=>setTimeout(r,2000*(attempt+1)));continue;}fail++;break;}}
       upd();}};
-    await Promise.all([worker(),worker(),worker()]);
-    az.pack={v:1,voice:az.voice,rate:az.rate,created:new Date().toISOString().slice(0,10),items};
+    await Promise.all(el?[worker(),worker()]:[worker(),worker(),worker()]);
+    az.pack={v:1,sig,provider:az.provider,voice:el?az.elVoice:az.voice,created:new Date().toISOString().slice(0,10),items};
     Object.keys(items).forEach(t=>{AUD[t]=items[t];});
-    az.running=false;$("#azRun").disabled=false;$("#azStop").hidden=true;
-    if(fatal){msg(azErr(fatal));return;}
-    const left=list.length-Object.keys(items).length;
-    $("#azDl").hidden=!Object.keys(items).length;
-    msg(left?`توقّف التوليد وبقي ${ar(left)} مقطعًا. اضغط «توليد كل التسجيلات» لإكمال الباقي.`:"اكتمل التوليد. الأصوات الجديدة تعمل الآن في هذه الصفحة للتجربة. اضغط «تنزيل حزمة الأصوات» وأرسل الملف لاعتماده للجميع.");};
+    az.running=false;$("#azRun").disabled=false;$("#azStop").hidden=true;$("#azDl").hidden=!Object.keys(items).length;
+    if(fatal){msg(ttsErr(fatal));return;}
+    const left=list.length-list.filter(t=>items[t]).length;
+    msg(left?`توقّف التوليد وبقي ${ar(left)} تسجيلًا. اضغط «توليد كل التسجيلات» لإكمال الباقي.`:"اكتمل التوليد. الأصوات الجديدة تعمل الآن في هذه الصفحة للتجربة. اضغط «تنزيل حزمة الأصوات» وأرسل الملف لاعتماده للجميع.");};
   $("#azDl").onclick=()=>{if(!az.pack)return;const blob=new Blob([JSON.stringify(az.pack)],{type:"application/json"});
     const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="voice-pack.json";document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},800);};
 }
