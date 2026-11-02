@@ -630,7 +630,8 @@ const SYS="أنت معلم لغة عربية خبير، أمضيت أربعين 
 
 /* ================= UI helpers ================= */
 const $=s=>document.querySelector(s);
-const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const num=x=>{const n=Number(x);return Number.isFinite(n)?n:0;}; // data from other users' records is untrusted
 let toastT;function toast(m){const t=$("#toast");t.textContent=m;t.classList.add("show");clearTimeout(toastT);toastT=setTimeout(()=>t.classList.remove("show"),3200);}
 const IC={
  play:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M19 5a10 10 0 0 1 0 14"/></svg>',
@@ -685,7 +686,7 @@ function renderHome(v){
       <h2>اقرأ بثقة، وانطق بإتقان</h2>
       <p>مسار تدريبي متدرّج مبني على كتاب «نور البيان»: يبدأ بالحرف، ثم الحركات والمدود والسكون والتنوين والشدة، وينتهي بنصوص لقياس طلاقة القراءة. يسمع الطالب النطق الصحيح، ثم ينطق بنفسه، ويصحّح له الموقع ما أمكن.</p>
       <div class="reg" role="group" aria-label="تسجيل الطالب">
-        <label class="field c3">اسم الطالب الثلاثي<input class="input" id="nameIn" list="nameList" autocomplete="off" placeholder="مثال: سالم محمد الكتبي" value="${esc(store.current||"")}"></label>
+        <label class="field c3">اسم الطالب الثلاثي<input class="input" id="nameIn" list="nameList" autocomplete="off" maxlength="100" placeholder="مثال: سالم محمد الكتبي" value="${esc(store.current||"")}"></label>
         <datalist id="nameList">${names.map(n=>`<option value="${esc(n)}">`).join("")}</datalist>
         <label class="field c3">اسم المعلم المشرف<input class="input" id="teachIn" autocomplete="off" maxlength="60" placeholder="مثال: أ. وائل محمد" value="${esc(curCls.teacher||"")}"></label>
         <label class="field c2">الصف<select class="input" id="gradeIn"><option value="">اختر الصف</option>${GRADES.map(g=>`<option value="${g}" ${curCls.grade===g?"selected":""}>${g}</option>`).join("")}</select></label>
@@ -1595,12 +1596,11 @@ function renderEnd(v){
 
 /* ================= Firebase backend (published web version) ================= */
 const FB_CONFIG={apiKey:"AIzaSyCFknVS1b8daKXHy0siPXsueVPHpXN1UBA",authDomain:"abjadiyat.firebaseapp.com",projectId:"abjadiyat",storageBucket:"abjadiyat.firebasestorage.app",messagingSenderId:"215366306605",appId:"1:215366306605:web:7397a5d7b24664bc11e1a4"};
-const ADMIN_EMAIL="amah7558@gmail.com";
 const RL={admin:"مسؤول المبادرة",principal:"مديرة المدرسة",teacher:"معلم"},RORD={admin:1,principal:2,teacher:3};
-const SUGGESTED_TEACHERS=["wael.mohamed@moe.sch.ae","ahmed.awadalla@moe.sch.ae","reda.elshahawy@moe.sch.ae"];
 const ON_WEB=/^https?:$/.test(location.protocol)&&!/claude/i.test(location.hostname);
 let FB=null,FBUSER=null,STAFF=null,FB_STATE="off"; // off | loading | ready | error
-function loadScript(src){return new Promise((res,rej)=>{const s=document.createElement("script");s.src=src;s.onload=res;s.onerror=()=>rej(new Error("load "+src));document.head.appendChild(s);});}
+const FB_SRI={"firebase-app-compat.js":"sha384-ZaR6mWzmJtrRibZ1Vm7SoHFr8OXjyAuGAXalGDKqbxFT18oi/z+oZLIRFkpeNor1","firebase-auth-compat.js":"sha384-I1LYojsZ5RM1cOda44Z2h42Qa6YfsQ1XkXxREnhp4ueYBR/4d1pG1K+NZM537Vsj","firebase-firestore-compat.js":"sha384-Ke0FJhH7LyRqDxZ0wt+/OXV38yfQVu7g9VPEEGjYmB4RVOY/ta04uecRhsMwT7V3"};
+function loadScript(src){return new Promise((res,rej)=>{const s=document.createElement("script");s.src=src;const sri=FB_SRI[src.split("/").pop()];if(sri){s.integrity=sri;s.crossOrigin="anonymous";}s.onload=res;s.onerror=()=>rej(new Error("load "+src));document.head.appendChild(s);});}
 function hashId(t){let h=0x811c9dc5;for(const ch of t){h^=ch.codePointAt(0);h=Math.imul(h,0x01000193)>>>0;}return "w"+h.toString(16)+"_"+t.length;}
 async function initFirebase(){
   if(!ON_WEB)return;
@@ -1617,12 +1617,10 @@ async function initFirebase(){
   FB.db.collection("overrides").get().then(snap=>{const o={};snap.forEach(d=>{const x=d.data();if(x&&x.t&&x.b64)o[stripPreMadd(x.t)]=x;});OVR=Object.assign({},OVR,o);}).catch(()=>{});
   FB.auth.onAuthStateChanged(async user=>{
     FBUSER=user;STAFF=null;
-    if(!user){FB.auth.signInAnonymously().catch(()=>{});ROLE="student";applyRoleUI();render();return;}
+    if(!user){FB.auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).then(()=>FB.auth.signInAnonymously()).catch(()=>{});ROLE="student";applyRoleUI();render();return;}
     if(user.isAnonymous){ROLE="student";applyRoleUI();render();queueSync();return;}
     try{
-      const ref=FB.db.collection("users").doc(user.uid);let doc=await ref.get();
-      if(!doc.exists&&String(user.email).toLowerCase()===ADMIN_EMAIL){
-        await ref.set({role:"admin",active:true,name:"مسؤول المبادرة",email:ADMIN_EMAIL,createdAt:firebase.firestore.FieldValue.serverTimestamp()});doc=await ref.get();}
+      const doc=await FB.db.collection("users").doc(user.uid).get();
       const d=doc.exists?doc.data():null;
       if(d&&d.active){STAFF=Object.assign({uid:user.uid},d);ROLE=(d.role==="admin"||d.role==="principal")?d.role:"teacher";ME_ID=user.uid;}
       else{ROLE="student";toast(d&&d.deleted?"حُذف هذا الحساب من المبادرة. تواصل مع مسؤول المبادرة.":d?"هذا الحساب موقوف. تواصل مع مسؤول المبادرة.":"هذا الحساب ليس له صلاحية معلم بعد.");}
@@ -1701,20 +1699,16 @@ function renderLogin(v){
       <label class="field">كلمة المرور<input class="input" id="lgPass" type="password" dir="ltr" autocomplete="current-password"></label>
       <button class="btn primary" type="submit" id="lgBtn">دخول</button>
       <div class="muted" id="lgMsg" style="font-size:13px;min-height:1.4em"></div>
-      <div class="login-links"><button type="button" class="linkbtn" id="lgReset">نسيت كلمة المرور؟</button><button type="button" class="linkbtn" id="lgAdmin">أول مرة؟ إنشاء حساب المسؤول</button></div>
+      <div class="login-links"><button type="button" class="linkbtn" id="lgReset">نسيت كلمة المرور؟</button></div>
     </form></section>`;
   const msg=t=>$("#lgMsg").textContent=t;
   $("#loginForm").onsubmit=async e=>{e.preventDefault();const em=$("#lgEmail").value.trim(),pw=$("#lgPass").value;
     if(!em||!pw){msg("اكتب البريد وكلمة المرور.");return;}
     $("#lgBtn").disabled=true;msg("جارٍ الدخول…");
-    try{await FB.auth.signInWithEmailAndPassword(em,pw);msg("");}catch(err){msg(fbErr(err));}
+    try{await FB.auth.setPersistence(firebase.auth.Auth.Persistence.SESSION);await FB.auth.signInWithEmailAndPassword(em,pw);msg("");}catch(err){msg(fbErr(err));}
     $("#lgBtn").disabled=false;};
   $("#lgReset").onclick=async()=>{const em=$("#lgEmail").value.trim();if(!em){msg("اكتب بريدك أولًا ثم اضغط «نسيت كلمة المرور».");return;}
     try{await FB.auth.sendPasswordResetEmail(em);msg("أُرسل رابط تعيين كلمة المرور إلى بريدك إن كان مسجّلًا.");}catch(err){msg(fbErr(err));}};
-  $("#lgAdmin").onclick=async()=>{const em=$("#lgEmail").value.trim().toLowerCase(),pw=$("#lgPass").value;
-    if(em!==ADMIN_EMAIL){msg("هذا الخيار لحساب مسؤول المبادرة فقط. اكتب بريد المسؤول وكلمة مرور جديدة (٨ أحرف فأكثر).");return;}
-    if(pw.length<8){msg("اختر كلمة مرور من ٨ أحرف على الأقل.");return;}
-    try{await FB.auth.createUserWithEmailAndPassword(em,pw);msg("أُنشئ حساب المسؤول.");}catch(err){msg(fbErr(err));}};
 }
 
 /* ---- admin / teacher dashboard (web) ---- */
@@ -1736,7 +1730,6 @@ async function renderWebAdmin(v){
         <label class="field">كلمة مرور مبدئية<input class="input" id="tPass" type="text" dir="ltr" autocomplete="off" placeholder="٦ أحرف على الأقل"></label>
         <button class="btn primary" type="submit" id="tAdd">إنشاء الحساب</button>
       </form>
-      <div class="muted" style="font-size:12.5px;margin-top:8px">بريدات مقترحة: ${SUGGESTED_TEACHERS.map(e=>`<button type="button" class="linkbtn" data-sug="${e}" dir="ltr">${e}</button>`).join(" · ")}</div>
       <div id="tMsg2" class="muted" style="font-size:13px;margin-top:6px"></div></div>
       <div><div class="people" id="uList"><p class="muted">جارٍ التحميل…</p></div></div></div>
     <p class="muted" style="font-size:12.5px;margin:10px 0 0">اطلب من كل صاحب حساب تغيير كلمة المرور المبدئية من صفحة «حسابي» بعد أول دخول.</p></section>`:""}
@@ -1762,22 +1755,22 @@ async function renderWebAdmin(v){
   const filtered=()=>{const nq=norm(dashF.q);const sec=dashF.sec.replace(/[٠-٩]/g,d=>"٠١٢٣٤٥٦٧٨٩".indexOf(d)).trim();
     return (STU_CACHE||[]).filter(s=>(!dashF.grade||s.grade===dashF.grade)&&(!sec||String(s.sec)===sec)&&(!dashF.teacher||norm(s.teacher||"").includes(norm(dashF.teacher)))&&(!nq||norm(s.name||"").includes(nq)))
       .sort((a,b)=>(a.grade||"").localeCompare(b.grade||"")||String(a.sec).localeCompare(String(b.sec),undefined,{numeric:true})||(a.name||"").localeCompare(b.name||""));};
-  const lastP=s=>{const ps=Object.entries(s.passages||{});if(!ps.length)return null;const best=ps.sort((a,b)=>b[0].localeCompare(a[0]))[0][1];return best;};
+  const lastP=s=>{const ps=Object.entries(s.passages||{}).filter(([,p])=>p&&typeof p==="object");if(!ps.length)return null;const best=ps.sort((a,b)=>b[0].localeCompare(a[0]))[0][1];return best;};
   const drawStudents=()=>{
     const list=filtered();const week=Date.now()-7*864e5;
     const active=list.filter(s=>s.updatedAt&&s.updatedAt.toMillis&&s.updatedAt.toMillis()>week).length;
-    const accs=list.map(lastP).filter(Boolean).map(p=>p.acc);
+    const accs=list.map(lastP).filter(Boolean).map(p=>num(p.acc));
     $("#kpis").innerHTML=`<div class="stat"><b>${ar(list.length)}</b><span>طالبًا مسجّلًا</span></div><div class="stat"><b>${ar(active)}</b><span>نشطون هذا الأسبوع</span></div><div class="stat"><b>${accs.length?ar(Math.round(accs.reduce((a,b)=>a+b,0)/accs.length))+"٪":"—"}</b><span>متوسط دقة القراءة</span></div>`;
-    $("#sTable").innerHTML=list.length?`<table><thead><tr><th>الطالب</th><th>الصف</th><th>الشعبة</th><th>المعلم المشرف</th><th>كلمات متقنة</th><th>مراحل اللعب</th><th>النقاط</th><th>آخر طلاقة</th><th>آخر نشاط</th>${isAdmin?"<th></th>":""}</tr></thead><tbody>${list.map((s,i)=>{const p=lastP(s);return `<tr><td data-c="name" data-i="${i}"></td><td>${esc(s.grade||"")}</td><td class="num">${esc(ar(s.sec||""))}</td><td data-c="teacher" data-i="${i}"></td><td class="num">${ar(s.mastered||0)}</td><td class="num">${ar(s.levels||0)}</td><td class="num">${ar(s.xp||0)}</td><td class="num">${p?ar(p.wcpm)+" ك/د · "+ar(p.acc)+"٪":"—"}</td><td class="num">${fmtDate(s.updatedAt)}</td>${isAdmin?`<td><button class="btn sm" data-del="${i}">حذف</button></td>`:""}</tr>`;}).join("")}</tbody></table>`:`<p class="muted">لا توجد نتائج مطابقة. تظهر نتائج الطالب هنا بعد تسجيله وتدرّبه على الموقع.</p>`;
+    $("#sTable").innerHTML=list.length?`<table><thead><tr><th>الطالب</th><th>الصف</th><th>الشعبة</th><th>المعلم المشرف</th><th>كلمات متقنة</th><th>مراحل اللعب</th><th>النقاط</th><th>آخر طلاقة</th><th>آخر نشاط</th>${isAdmin?"<th></th>":""}</tr></thead><tbody>${list.map((s,i)=>{const p=lastP(s);return `<tr><td data-c="name" data-i="${i}"></td><td>${esc(s.grade||"")}</td><td class="num">${esc(ar(s.sec||""))}</td><td data-c="teacher" data-i="${i}"></td><td class="num">${ar(num(s.mastered))}</td><td class="num">${ar(num(s.levels))}</td><td class="num">${ar(num(s.xp))}</td><td class="num">${p?ar(num(p.wcpm))+" ك/د · "+ar(num(p.acc))+"٪":"—"}</td><td class="num">${fmtDate(s.updatedAt)}</td>${isAdmin?`<td><button class="btn sm" data-del="${i}">حذف</button></td>`:""}</tr>`;}).join("")}</tbody></table>`:`<p class="muted">لا توجد نتائج مطابقة. تظهر نتائج الطالب هنا بعد تسجيله وتدرّبه على الموقع.</p>`;
     $("#sTable").querySelectorAll("[data-c]").forEach(td=>{td.textContent=list[+td.dataset.i][td.dataset.c]||"";});
     $("#sTable").querySelectorAll("[data-del]").forEach(b=>b.onclick=()=>{const st=list[+b.dataset.del];const td=b.parentElement;
       td.innerHTML=`<span style="display:flex;gap:4px;flex-wrap:wrap"><button class="btn sm" style="color:var(--red);border-color:var(--red)" data-y>تأكيد الحذف</button><button class="btn sm" data-n>تراجع</button></span>`;
       td.querySelector("[data-n]").onclick=()=>drawStudents();
       td.querySelector("[data-y]").onclick=async()=>{try{await FB.db.collection("students").doc(st.id).delete();STU_CACHE=STU_CACHE.filter(x=>x.id!==st.id);drawStudents();toast("حُذف سجل الطالب");}catch(e){toast(fbErr(e));}};});
-    const agg={};list.forEach(s=>Object.entries(s.subs||{}).forEach(([c,n])=>agg[c]=(agg[c]||0)+n));
+    const agg={};list.forEach(s=>Object.entries(s.subs||{}).forEach(([c,n])=>agg[c]=(agg[c]||0)+num(n)));
     const top=Object.entries(agg).sort((a,b)=>b[1]-a[1]).slice(0,10);
     $("#subsBox").innerHTML=top.length?top.map(([c,n])=>`<span class="lc">${NAMES[c]||esc(c)}<small>${ar(n)} مرة</small></span>`).join(""):`<p class="muted" style="margin:0">لا توجد بيانات بعد.</p>`;
-    const hg={};list.forEach(s=>Object.entries(s.harakat||{}).forEach(([c,n])=>hg[c]=(hg[c]||0)+n));
+    const hg={};list.forEach(s=>Object.entries(s.harakat||{}).forEach(([c,n])=>hg[c]=(hg[c]||0)+num(n)));
     const ht=Object.entries(hg).sort((a,b)=>b[1]-a[1]);
     $("#harBox").innerHTML=ht.length?ht.map(([c,n])=>`<span class="lc">${esc(c)}<small>${ar(n)} مرة</small></span>`).join(""):`<p class="muted" style="margin:0">لا توجد بيانات بعد.</p>`;
   };
@@ -1805,11 +1798,10 @@ async function renderWebAdmin(v){
   $("#refresh").onclick=()=>load(true);
   $("#csv").onclick=()=>{const list=filtered();const rows=[["الطالب","الصف","الشعبة","المعلم المشرف","كلمات متقنة","كلمات تدرب عليها","مراحل اللعب","النقاط","سلسلة الأيام","آخر طلاقة (كلمة/دقيقة)","آخر دقة %","آخر نشاط"]];
     list.forEach(s=>{const p=lastP(s);rows.push([s.name,s.grade,s.sec,s.teacher,s.mastered||0,s.tried||0,s.levels||0,s.xp||0,s.streak||0,p?p.wcpm:"",p?p.acc:"",s.updatedAt&&s.updatedAt.toDate?s.updatedAt.toDate().toISOString().slice(0,10):""]);});
-    const csv="﻿"+rows.map(r=>r.map(x=>'"'+String(x==null?"":x).replace(/"/g,'""')+'"').join(",")).join("\r\n");
+    const csv="﻿"+rows.map(r=>r.map(x=>{let c=String(x==null?"":x);if(typeof x==="string"&&/^[=+\-@\t\r]/.test(c))c="'"+c;return '"'+c.replace(/"/g,'""')+'"';}).join(",")).join("\r\n");
     const a=document.createElement("a");a.href=URL.createObjectURL(new Blob([csv],{type:"text/csv;charset=utf-8"}));a.download="abjadiyat-students.csv";document.body.appendChild(a);a.click();setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},500);};
   if(isAdmin){
     renderTTS($("#ttsBox"));
-    v.querySelectorAll("[data-sug]").forEach(b=>b.onclick=()=>{$("#tMail").value=b.dataset.sug;$("#tName").focus();});
     $("#tForm").onsubmit=async e=>{e.preventDefault();const role=$("#tRole").value==="principal"?"principal":"teacher";const name=$("#tName").value.trim(),email=$("#tMail").value.trim().toLowerCase(),pw=$("#tPass").value;const m=$("#tMsg2");
       if(name.length<3){m.textContent="اكتب الاسم.";return;}
       if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)){m.textContent="اكتب بريدًا صحيحًا.";return;}
