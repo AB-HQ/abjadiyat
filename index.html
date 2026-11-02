@@ -557,9 +557,17 @@ function remapKeys(obj){const o={};Object.keys(obj||{}).forEach(k=>{const n=stri
 let AUD={},OVR={};try{AUD=remapKeys(JSON.parse(document.getElementById("audioData").textContent));}catch(e){}
 let curAudio=null;
 function stopAudio(){if(curAudio){try{curAudio.onended=null;curAudio.onerror=null;curAudio.pause();}catch(e){}curAudio=null;}try{speechSynthesis.cancel()}catch(e){}}
-function speak(text,rate,onend){
+function speak(text,rate,onend,loaded){
   stopAudio();
   const key=String(text).trim();const k2=key.replace(/[،.؛:؟!]/g,"");
+  const tok=++speakTok;
+  if(!loaded){ // a teacher recording may exist: wait for the index / the recording (at most 2.5 s)
+    const need=()=>!(OVR[key]||OVR[k2])&&(OVR_IDS[key]||OVR_IDS[k2]);
+    if((ON_WEB&&!OVR_SETTLED)||need()){
+      Promise.race([IDX_SETTLED.then(()=>need()?ensureOvr([key,k2]):null),new Promise(r=>setTimeout(r,2500))])
+        .then(()=>{if(tok===speakTok)speak(text,rate,onend,true);});
+      return;}
+  }
   const ov=OVR[key]||OVR[k2];const b=AUD[key]||AUD[k2];
   const src=ov?("data:"+ov.mime+";base64,"+ov.b64):(b?"data:audio/mpeg;base64,"+b:null);
   if(src&&!prefs.voice){
@@ -598,7 +606,6 @@ function listenOnce(onResult,onState){
   if(micBlocked)return;
   let rec;try{rec=new SR();}catch(e){blockMic("التعرّف على الكلام غير متاح هنا");return;}
   rec.lang=prefs.srLang;rec.interimResults=false;rec.maxAlternatives=5;rec.continuous=false;
-  let got=false;
   let mr=null,chunks=[],stream=null,stopped=false;
   const canTape=navigator.mediaDevices&&window.MediaRecorder&&!/Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
   if(canTape)navigator.mediaDevices.getUserMedia({audio:true}).then(st=>{stream=st;if(stopped){st.getTracks().forEach(t=>t.stop());return;}
@@ -606,12 +613,12 @@ function listenOnce(onResult,onState){
     mr.onstop=()=>{st.getTracks().forEach(t=>t.stop());if(chunks.length){if(LAST_TAKE)URL.revokeObjectURL(LAST_TAKE);LAST_TAKE=URL.createObjectURL(new Blob(chunks,{type:mr.mimeType}));const pb=document.getElementById("playMine");if(pb)pb.hidden=false;}};
     mr.start();}).catch(()=>{});
   const stopTape=()=>{stopped=true;setTimeout(()=>{try{if(mr&&mr.state==="recording")mr.stop();else if(stream)stream.getTracks().forEach(t=>t.stop());}catch(e){}},250);};
-  rec.onresult=e=>{got=true;const r=e.results[0];const alts=[];for(let i=0;i<r.length;i++)alts.push(r[i].transcript);onResult(alts);};
+  rec.onresult=e=>{const r=e.results[0];const alts=[];for(let i=0;i<r.length;i++)alts.push(r[i].transcript);onResult(alts);};
   rec.onerror=e=>{onState(false);stopTape();
     if(e.error==="not-allowed"||e.error==="service-not-allowed")blockMic("الميكروفون غير مسموح به في هذه الصفحة، فتحوّل الموقع إلى التقييم الذاتي");
     else if(e.error==="no-speech")toast("لم يُسمع صوت، اقترب من الميكروفون وحاول مرة أخرى");
     else if(e.error==="network")toast("التعرّف على الكلام يحتاج اتصالًا بالإنترنت");};
-  rec.onend=()=>{onState(false);stopTape();if(!got)return;};
+  rec.onend=()=>{onState(false);stopTape();};
   try{rec.start();onState(true);}catch(e){blockMic("تعذّر تشغيل الميكروفون");}
   return rec;
 }
@@ -671,7 +678,7 @@ function render(){
   else if(state.view==="audio")renderAudio(v);
   else if(state.view==="about")renderAbout(v);
   else if(state.view==="play")renderPlay(v);
-  else if(state.view==="admin")(ON_WEB?renderWebAdmin(v):renderAdmin(v));
+  else if(state.view==="admin")renderWebAdmin(v);
   else if(state.view==="login")renderLogin(v);
   else renderHome(v);
 }
@@ -790,7 +797,8 @@ function renderLesson(v,les){
       activeRec=listenOnce(alts=>showResult(it,alts,les,u),on=>{mb.classList.toggle("listening",on);if(!on)activeRec=null;});
     };
   }
-  setupRecorder(it.t);
+  setupRecorder();
+  prefetchLesson(les);
 }
 function tipForWord(t){
   const letters=[...new Set(norm(t).split(""))].filter(c=>MAKHRAJ[c]&&"صضطظذثقعحغخ".includes(c)).slice(0,2);
@@ -939,7 +947,7 @@ function renderPassage(v,les){
   // read aloud by sentence
   $("#readAll").onclick=()=>{
     if(running)return;
-    const chunks=[];let cur=[];words.forEach((w,i)=>{cur.push(i);if(/[،.؛:؟!]$/.test(w)||i===words.length-1){chunks.push(cur);cur=[];}});
+    const chunks=passageChunks(words);
     let k=0;const next=()=>{spans.forEach(s=>s.classList.remove("hl"));if(k>=chunks.length)return;const c=chunks[k++];c.forEach(i=>spans[i].classList.add("hl"));speak(c.map(i=>words[i]).join(" "),prefs.rate,next);};
     next();
   };
@@ -987,6 +995,7 @@ function renderPassage(v,les){
       };startRec();
     }
   };
+  prefetchLesson(les);
 }
 
 /* ================= Report ================= */
@@ -1095,32 +1104,14 @@ fillVoiceSel();
 const GRADES=["الخامس","السادس","السابع","الثامن","التاسع","العاشر","الحادي عشر","الثاني عشر"];
 
 /* ================= Roles & recording overrides ================= */
-let ROLE="student",ME_ID=null,USERNS=null,ROLES={teachers:[]},PENDING={},SAVING=false;
-async function fetchJSON(p){try{const r=await fetch(p,{cache:"no-store"});if(!r.ok)return null;return await r.json();}catch(e){return null;}}
-async function initData(){
-  const o=await fetchJSON("overrides.json");if(o&&o.items&&typeof o.items==="object")OVR=remapKeys(o.items);
-  const r=await fetchJSON("roles.json");if(r&&Array.isArray(r.teachers))ROLES={teachers:r.teachers};
-  if(window.claude&&window.claude.use){
-    try{USERNS=await window.claude.use("user");}catch(e){USERNS=null;}
-    if(USERNS){
-      try{ME_ID=await USERNS.id();}catch(e){ME_ID=null;}
-      let myEmail="";try{const me=await USERNS.me();myEmail=String((me&&me.email)||"").toLowerCase();}catch(e){}
-      let owner=false;try{owner=await USERNS.isOwner();}catch(e){}
-      if(owner)ROLE="admin";
-      else{let ed=false;try{ed=await USERNS.canEdit();}catch(e){}
-        if(ed||ROLES.teachers.some(t=>(ME_ID&&t.id===ME_ID)||(myEmail&&t.email&&t.email.toLowerCase()===myEmail)))ROLE="teacher";}
-    }
-  }
-  applyRoleUI();
-  if(ROLE!=="student"||Object.keys(OVR).length)render();
-}
+let ROLE="student",ME_ID=null,PENDING={},SAVING=false;
 function applyRoleUI(){
   document.querySelectorAll("[data-role]").forEach(el=>{const need=el.dataset.role;el.hidden=!(ROLE==="admin"||(need==="teacher"&&ROLE==="teacher")||(ON_WEB&&need==="admin"&&(ROLE==="teacher"||ROLE==="principal")));});
   const at=document.querySelector('.tab[data-go="admin"]');if(at)at.textContent=ON_WEB?(ROLE==="admin"?"لوحة الإدارة":ROLE==="principal"?"لوحة المديرة":"لوحة المعلم"):"لوحة المسؤول";
   const lt=document.getElementById("loginTab");if(lt)lt.textContent=(typeof STAFF!=="undefined"&&STAFF)?"حسابي":"دخول المعلمين";
 }
 function noAccess(){return `<section class="card" style="max-width:640px"><h2 style="font-size:22px">هذا القسم للمعلمين والمسؤول</h2>
-  <p class="muted">إدارة التسجيلات تعمل من الصفحة المنشورة على Claude، لمن أضافه المسؤول إلى قائمة المعلمين. إن كنت معلمًا ولا يظهر لك هذا القسم، فاطلب من المسؤول إضافتك.</p>
+  <p class="muted">سجّل الدخول من «دخول المعلمين» بالحساب الذي أنشأه لك مسؤول المبادرة. إن لم يكن لديك حساب، فاطلبه من المسؤول.</p>
   <a class="btn primary" href="#home" style="text-decoration:none">العودة إلى مسار التعلّم</a></section>`;}
 function saveErr(e){const c=e&&e.code;
   if(c==="not_writer"||c==="not_granted"||c==="consent_required")return "لا تملك صلاحية الحفظ بعد. اطلب من المسؤول مشاركة الصفحة معك بصلاحية «محرر».";
@@ -1129,29 +1120,30 @@ function saveErr(e){const c=e&&e.code;
   if(c==="too_large")return "حجم التسجيلات كبير. اجعل كل تسجيل قصيرًا (أقل من ٨ ثوانٍ).";
   if(c==="rate_limited")return "عمليات حفظ كثيرة متتالية. انتظر دقيقة ثم احفظ مرة واحدة.";
   return "تعذّر الحفظ الآن. حاول مرة أخرى بعد قليل.";}
-async function publishFiles(files){
-  const art=(window.claude&&window.claude.use)?await window.claude.use("artifact"):null;
-  if(!art)throw {code:"capability_disabled"};
-  return art.publish(files);
-}
-
 /* every text that has a recording */
 let ALLTEXTS=null;
 function allTexts(){
   if(ALLTEXTS)return ALLTEXTS;
   const out=[],seen=new Set();
   const add=(t,u,kind,les)=>{t=t.trim();if(!t||seen.has(t))return;seen.add(t);out.push({t,u,kind,les});};
-  UNITS.forEach(u=>u.lessons.forEach(les=>{
-    if(les.passage){
-      const w=les.passage.split(/\s+/).filter(Boolean);let cur=[];
-      w.forEach((x,i)=>{cur.push(x);if(/[،.؛:؟!]$/.test(x)||i===w.length-1){add(cur.join(" "),u.id,"جملة من النص",les.title);cur=[];}});
-      w.forEach(x=>add(x.replace(/[،.؛:؟!]/g,""),u.id,"كلمة من النص",les.title));
-    }else les.items.forEach(it=>{const o=typeof it==="string"?{t:it}:it;const ph=/\s/.test(o.t.trim());
-      add(o.t,u.id,ph?"جملة":"كلمة",les.title);
-      if(o.letter)add(o.name+"، "+o.t,u.id,"اسم الحرف مع الكلمة",les.title);
-      if(!ph)syllables(o.t).forEach(x=>add(x,u.id,"مقطع صوتي",les.title));});
-  }));
+  UNITS.forEach(u=>u.lessons.forEach(les=>lessonTexts(les).forEach(([t,kind])=>add(t,u.id,kind,les.title))));
   return (ALLTEXTS=out);
+}
+/* a passage read sentence by sentence: arrays of word indexes, split at punctuation.
+   The sentence recordings are keyed by exactly these chunks. */
+function passageChunks(words){const chunks=[];let cur=[];words.forEach((w,i)=>{cur.push(i);if(/[،.؛:؟!]$/.test(w)||i===words.length-1){chunks.push(cur);cur=[];}});return chunks;}
+/* every text one lesson can play, as [text, kind] */
+function lessonTexts(les){
+  const out=[];
+  if(les.passage){
+    const w=les.passage.split(/\s+/).filter(Boolean);
+    passageChunks(w).forEach(c=>out.push([c.map(i=>w[i]).join(" "),"جملة من النص"]));
+    w.forEach(x=>out.push([x.replace(/[،.؛:؟!]/g,""),"كلمة من النص"]));
+  }else les.items.forEach(it=>{const o=typeof it==="string"?{t:it}:it;const ph=/\s/.test(o.t.trim());
+    out.push([o.t,ph?"جملة":"كلمة"]);
+    if(o.letter)out.push([o.name+"، "+o.t,"اسم الحرف مع الكلمة"]);
+    if(!ph)syllables(o.t).forEach(x=>out.push([x,"مقطع صوتي"]));});
+  return out;
 }
 
 /* audio processing: any recording -> trimmed, normalized 16 kHz mono WAV */
@@ -1273,87 +1265,6 @@ function openEditor(row,x,v){
 /* ================= Admin panel ================= */
 const AV_COLORS=["#9C7428","#0E7A4B","#1F5FAF","#B5102A","#6B4FA0","#A65F00"];
 function avatar(name,id){const c=AV_COLORS[[...String(id||name)].reduce((a,ch)=>a+ch.charCodeAt(0),0)%AV_COLORS.length];return `<span class="avatar" style="background:${c}">${esc((name||"؟").trim().charAt(0))}</span>`;}
-async function renderAdmin(v){
-  if(ROLE!=="admin"){v.innerHTML=noAccess();return;}
-  const ovCount=Object.keys(OVR).length;
-  v.innerHTML=`
-  <div class="lesson-top"><div><h2>لوحة المسؤول</h2><div class="muted">إدارة حسابات المعلمين وصلاحية تعديل التسجيلات.</div></div></div>
-  <div class="two">
-    <section class="card"><h3 style="margin-bottom:10px">الحسابات</h3>
-      <div class="people">
-        <div class="person"><div class="who">${avatar("م","admin")}<div><b id="adminName">أنت</b><div class="role-tag">مسؤول المبادرة · صاحب الصفحة</div></div></div></div>
-        <div id="tList"><p class="muted" style="margin:0">جارٍ تحميل المعلمين…</p></div>
-      </div>
-      <h3 style="margin:18px 0 6px;font-size:15px">إضافة معلم</h3>
-      <div style="display:flex;gap:8px;flex-wrap:wrap"><input class="input" id="tEmail" type="email" dir="ltr" placeholder="name@moe.sch.ae" style="flex:1 1 220px;text-align:left"><button class="btn primary" id="tEmailAdd">إضافة بالبريد</button></div>
-      <input class="input" id="tSearch" placeholder="أو ابحث باسم المعلم إن كان في مؤسستك" style="width:100%;margin-top:8px">
-      <div id="tRes" class="people" style="margin-top:8px"></div>
-      <div id="tMsg" class="muted" style="font-size:12.5px;margin-top:6px"></div>
-    </section>
-    <section class="card"><h3 style="margin-bottom:6px">كيف تمنح المعلم الصلاحية؟</h3>
-      <ol class="steps-inline">
-        <li>من زر <b>المشاركة</b> أعلى هذه الصفحة في Claude، شارك الصفحة مع المعلم بصلاحية <b>«محرر»</b>.</li>
-        <li>أضف بريده هنا إلى قائمة المعلمين.</li>
-        <li>يسجّل المعلم الدخول إلى Claude بالبريد نفسه، وعندما يفتح الصفحة من حسابه يظهر له قسم «إدارة التسجيلات» ويستطيع استبدال أي تسجيل.</li>
-      </ol>
-      <p class="muted" style="font-size:12.5px">لسحب الصلاحية: احذفه من القائمة، وألغِ مشاركته من زر المشاركة.</p>
-      <h3 style="margin:16px 0 6px">نسخة موقع المدرسة</h3>
-      <p style="font-size:13.5px;margin:0">عدد التسجيلات المستبدلة: <b>${ar(ovCount)}</b>. لتصل إلى الموقع المنشور على خادم المدرسة، نزّل ملف التسجيلات وضعه في المجلد نفسه بجوار <b>index.html</b>.</p>
-      <button class="btn" id="dlOvr" style="margin-top:10px" ${ovCount?"":"disabled"}>تنزيل ملف التسجيلات (overrides.json)</button>
-    </section>
-  </div>
-  <section class="card" style="margin-top:18px"><h3 style="margin-bottom:8px">سجل التسجيلات المستبدلة</h3><div class="tbl" id="logBox"></div></section>`;
-  // admin name
-  if(USERNS){try{const me=await USERNS.me();if(me&&me.name)$("#adminName").textContent=me.name+" (أنت)";}catch(e){}}
-  const drawTeachers=async()=>{
-    const ids=ROLES.teachers.map(t=>t.id).filter(Boolean);let ps={};
-    if(ids.length&&USERNS){try{ps=await USERNS.profiles(ids);}catch(e){}}
-    const box=$("#tList");if(!box)return;
-    if(!ROLES.teachers.length){box.innerHTML=`<p class="muted" style="margin:0">لم يُضف أي معلم بعد.</p>`;return;}
-    const label=t=>(t.id&&ps[t.id]&&ps[t.id].name)||t.email||"معلم";
-    box.innerHTML=ROLES.teachers.map((t,i)=>`<div class="person"><div class="who">${avatar(label(t),t.id||t.email)}<div style="min-width:0"><b data-nm="${i}" style="word-break:break-all"></b><div class="role-tag">معلم · أُضيف ${t.at?ar(t.at):""}</div></div></div><button class="btn sm" data-rm="${i}">إزالة</button></div>`).join("");
-    box.querySelectorAll("[data-nm]").forEach(el=>{el.textContent=label(ROLES.teachers[+el.dataset.nm]);});
-    box.querySelectorAll("[data-rm]").forEach(b=>b.onclick=()=>saveRoles(ROLES.teachers.filter((_,i)=>i!==+b.dataset.rm),"أُزيل المعلم من القائمة"));
-  };
-  const saveRoles=async(list,okMsg)=>{
-    $("#tMsg").textContent="جارٍ الحفظ…";
-    try{await publishFiles({"roles.json":{content:JSON.stringify({teachers:list}),contentType:"application/json"}});ROLES={teachers:list};$("#tMsg").textContent="";toast(okMsg);drawTeachers();}
-    catch(e){$("#tMsg").textContent=saveErr(e);}
-  };
-  drawTeachers();
-  $("#tEmailAdd").onclick=()=>{const em=$("#tEmail").value.trim().toLowerCase();
-    if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(em)){$("#tMsg").textContent="اكتب بريدًا إلكترونيًّا صحيحًا.";return;}
-    if(ROLES.teachers.some(t=>t.email===em)){$("#tMsg").textContent="هذا المعلم مضاف من قبل.";return;}
-    $("#tEmail").value="";saveRoles(ROLES.teachers.concat([{email:em,at:new Date().toISOString().slice(0,10)}]),"أُضيف المعلم. شارك الصفحة مع بريده بصلاحية «محرر».");};
-  let ts;$("#tSearch").oninput=e=>{clearTimeout(ts);const q=e.target.value.trim();ts=setTimeout(async()=>{
-    const res=$("#tRes");if(!q){res.innerHTML="";return;}
-    if(!USERNS){res.innerHTML=`<p class="muted">البحث عن الحسابات غير متاح في هذا العرض.</p>`;return;}
-    let hits=[];try{hits=await USERNS.search(q);}catch(err){}
-    hits=hits.filter(h=>!h.isMe&&!ROLES.teachers.some(t=>t.id===h.id)).slice(0,6);
-    if(!hits.length){res.innerHTML=`<p class="muted" style="margin:0;font-size:13px">لا توجد نتائج. يظهر هنا من في مؤسستك أو من شاركت الصفحة معه.</p>`;return;}
-    res.innerHTML=hits.map((h,i)=>`<div class="person"><div class="who">${avatar(h.name,h.id)}<div><b data-h="${i}"></b><div class="role-tag" data-e="${i}"></div></div></div><button class="btn sm primary" data-add="${i}">إضافة كمعلم</button></div>`).join("");
-    res.querySelectorAll("[data-h]").forEach(el=>el.textContent=hits[+el.dataset.h].name||"مستخدم");
-    res.querySelectorAll("[data-e]").forEach(el=>el.textContent=hits[+el.dataset.e].email||"");
-    res.querySelectorAll("[data-add]").forEach(b=>b.onclick=()=>{const h=hits[+b.dataset.add];$("#tSearch").value="";res.innerHTML="";
-      saveRoles(ROLES.teachers.concat([{id:h.id,at:new Date().toISOString().slice(0,10)}]),"أُضيف المعلم. تذكّر مشاركة الصفحة معه بصلاحية «محرر».");});
-  },350);};
-  $("#dlOvr").onclick=async()=>{
-    const dl=(window.claude&&window.claude.use)?await window.claude.use("downloads"):null;
-    if(!dl){toast("التنزيل غير متاح في هذا العرض");return;}
-    try{await dl.save({filename:"overrides.json",data:JSON.stringify({v:1,items:OVR})});}
-    catch(e){if(e&&e.code!=="declined")toast("تعذّر التنزيل الآن");}
-  };
-  // log
-  const ents=Object.entries(OVR).sort((a,b)=>String(b[1].at||"").localeCompare(String(a[1].at||"")));
-  const lb=$("#logBox");
-  if(!ents.length){lb.innerHTML=`<p class="muted" style="margin:0">لا توجد تسجيلات مستبدلة. يستخدم الموقع التسجيلات الأصلية.</p>`;return;}
-  let ps={};const ids=[...new Set(ents.map(e=>e[1].by).filter(Boolean))];
-  if(ids.length&&USERNS){try{ps=await USERNS.profiles(ids);}catch(e){}}
-  lb.innerHTML=`<table><thead><tr><th>النص</th><th>بواسطة</th><th>التاريخ</th><th></th></tr></thead><tbody>${ents.map(([t,o],i)=>`<tr><td style="font-family:var(--f-read);font-size:20px">${esc(t)}</td><td data-by="${i}"></td><td class="num">${o.at?ar(o.at):"—"}</td><td><button class="btn sm" data-pl="${i}">${IC.play}</button></td></tr>`).join("")}</tbody></table>`;
-  lb.querySelectorAll("[data-by]").forEach(el=>{const o=ents[+el.dataset.by][1];el.textContent=(o.by&&ps[o.by]&&ps[o.by].name)||"معلم";});
-  lb.querySelectorAll("[data-pl]").forEach(b=>b.onclick=()=>playData(ents[+b.dataset.pl][1]));
-}
-
 /* ================= About page ================= */
 function renderAbout(v){
   v.innerHTML=`<div class="about">
@@ -1504,7 +1415,7 @@ function renderPlay(v){
     if(!isRegistered()&&ROLE==="student"){toast("سجّل اسمك وصفك أولًا من صفحة مسار التعلّم");go("home");return;}
     startLevel(LEVELS[+b.dataset.lv]);});
 }
-function startLevel(lv){G={lv,qs:buildQuestions(lv),i:0,hearts:3,xp:0,correct:0,answered:0,state:"ask",sel:null,built:[],retry:new Set()};render();window.scrollTo(0,0);setTimeout(autoPlay,250);}
+function startLevel(lv){prefetchLesson(lv.les);G={lv,qs:buildQuestions(lv),i:0,hearts:3,xp:0,correct:0,answered:0,state:"ask",sel:null,built:[],retry:new Set()};render();window.scrollTo(0,0);setTimeout(autoPlay,250);}
 function autoPlay(){if(!G||G.state!=="ask")return;const q=G.qs[G.i];if(!q)return;if(["listen","vowel","build"].includes(q.kind))speak(q.t,prefs.rate);}
 function renderSession(v){
   if(G.state==="end"||G.state==="fail"){renderEnd(v);return;}
@@ -1604,6 +1515,7 @@ function loadScript(src){return new Promise((res,rej)=>{const s=document.createE
 function hashId(t){let h=0x811c9dc5;for(const ch of t){h^=ch.codePointAt(0);h=Math.imul(h,0x01000193)>>>0;}return "w"+h.toString(16)+"_"+t.length;}
 async function initFirebase(){
   if(!ON_WEB)return;
+  setTimeout(()=>idxSettle(),4000); // never hold audio back for long if the network is slow
   FB_STATE="loading";document.body.classList.add("web-on");
   try{
     const base="https://cdn.jsdelivr.net/npm/firebase@10.14.1/";
@@ -1612,9 +1524,12 @@ async function initFirebase(){
     const app=firebase.initializeApp(FB_CONFIG);
     FB={app,auth:firebase.auth(),db:firebase.firestore()};
     FB_STATE="ready";
-  }catch(e){FB_STATE="error";console.warn(e);return;}
-  // recordings from teachers (public read)
-  FB.db.collection("overrides").get().then(snap=>{const o={};snap.forEach(d=>{const x=d.data();if(x&&x.t&&x.b64)o[stripPreMadd(x.t)]=x;});OVR=Object.assign({},OVR,o);}).catch(()=>{});
+  }catch(e){FB_STATE="error";console.warn(e);idxSettle();return;}
+  // teacher recordings: read the small index now, fetch each recording only when it is needed
+  OVR_READY=FB.db.collection("meta").doc("overrides").get().then(d=>{
+    if(!d.exists)return loadAllOverrides(); // no index yet: load everything, as before
+    IDX_RAW=(d.data()||{}).ids||{};Object.keys(IDX_RAW).forEach(id=>{OVR_IDS[stripPreMadd(IDX_RAW[id])]=id;});
+  }).catch(()=>{}).then(()=>idxSettle());
   FB.auth.onAuthStateChanged(async user=>{
     FBUSER=user;STAFF=null;
     if(!user){FB.auth.setPersistence(firebase.auth.Auth.Persistence.LOCAL).then(()=>FB.auth.signInAnonymously()).catch(()=>{});ROLE="student";applyRoleUI();render();return;}
@@ -1622,25 +1537,51 @@ async function initFirebase(){
     try{
       const doc=await FB.db.collection("users").doc(user.uid).get();
       const d=doc.exists?doc.data():null;
-      if(d&&d.active){STAFF=Object.assign({uid:user.uid},d);ROLE=(d.role==="admin"||d.role==="principal")?d.role:"teacher";ME_ID=user.uid;}
+      if(d&&d.active){STAFF=Object.assign({uid:user.uid},d);ROLE=(d.role==="admin"||d.role==="principal")?d.role:"teacher";ME_ID=user.uid;if(ROLE!=="principal")syncOverrideIndex();}
       else{ROLE="student";toast(d&&d.deleted?"حُذف هذا الحساب من المبادرة. تواصل مع مسؤول المبادرة.":d?"هذا الحساب موقوف. تواصل مع مسؤول المبادرة.":"هذا الحساب ليس له صلاحية معلم بعد.");}
     }catch(e){ROLE="student";toast("تعذّر التحقق من الحساب. تحقق من الاتصال.");}
     applyRoleUI();
     if(state.view==="login"&&ROLE!=="student")go(ROLE==="teacher"?"audio":"admin");else render();
   });
 }
-/* persist recordings: Firestore on the web, artifact files inside Claude */
+/* teacher recordings: OVR = loaded recordings, OVR_IDS = text -> document id for every recording */
+let OVR_IDS={},IDX_RAW=null,OVR_FULL=false,OVR_READY=Promise.resolve(),OVR_SETTLED=false,speakTok=0,idxSettle;const OVR_FETCH={};
+const IDX_SETTLED=new Promise(r=>idxSettle=()=>{OVR_SETTLED=true;r();});
+async function loadAllOverrides(){
+  const snap=await FB.db.collection("overrides").get();const o={},ids={};
+  snap.forEach(d=>{const x=d.data();if(x&&x.t&&x.b64){const k=stripPreMadd(x.t);o[k]=x;ids[k]=d.id;}});
+  OVR=o;OVR_IDS=ids;OVR_FULL=true;
+}
+function idxFromIds(ids){const o={};Object.entries(ids).forEach(([t,id])=>o[id]=t);return o;}
+const sortedJSON=o=>JSON.stringify(Object.keys(o).sort().map(k=>[k,o[k]]));
+function ensureOvr(texts){
+  if(!FB)return Promise.resolve();
+  return OVR_READY.then(()=>Promise.all(texts.map(t=>{const k=String(t).trim();const id=OVR_IDS[k];
+    if(!id||OVR[k])return null;
+    if(!OVR_FETCH[id])OVR_FETCH[id]=FB.db.collection("overrides").doc(id).get().then(d=>{const x=d.exists&&d.data();if(x&&x.b64)OVR[k]=x;}).catch(()=>{delete OVR_FETCH[id];});
+    return OVR_FETCH[id];})));
+}
+function prefetchLesson(les){if(les&&FB)ensureOvr(lessonTexts(les).map(x=>x[0]));}
+/* staff who can record need the full list; they also keep the public index up to date */
+async function syncOverrideIndex(){
+  try{await OVR_READY;await loadAllOverrides();const want=idxFromIds(OVR_IDS);
+    const have=IDX_RAW&&idxFromIds(Object.fromEntries(Object.entries(IDX_RAW).map(([id,t])=>[stripPreMadd(t),id])));
+    if(!have||sortedJSON(have)!==sortedJSON(want))await FB.db.collection("meta").doc("overrides").set({ids:want});
+    IDX_RAW=want;if(state.view==="audio")render();}
+  catch(e){console.warn("overrides index",e);}
+}
 async function persistOverrides(items){
   if(FB&&STAFF){
-    const batch=FB.db.batch();const now=new Date().toISOString().slice(0,10);
-    Object.entries(PENDING).forEach(([t,p])=>{const ref=FB.db.collection("overrides").doc(hashId(t));
-      if(p.del)batch.delete(ref);else batch.set(ref,{t,b64:p.b64,mime:p.mime,by:STAFF.uid,byName:STAFF.name||STAFF.email,at:now});});
-    await batch.commit();
+    if(!OVR_FULL)throw {code:"not_ready"};
+    const batch=FB.db.batch();const now=new Date().toISOString().slice(0,10);const next=Object.assign({},OVR_IDS);
+    Object.entries(PENDING).forEach(([t,p])=>{const id=next[t]||hashId(t);const ref=FB.db.collection("overrides").doc(id);
+      if(p.del){batch.delete(ref);delete next[t];}else{batch.set(ref,{t,b64:p.b64,mime:p.mime,by:STAFF.uid,byName:STAFF.name||STAFF.email,at:now});next[t]=id;}});
+    const ids=idxFromIds(next);batch.set(FB.db.collection("meta").doc("overrides"),{ids});
+    await batch.commit();OVR_IDS=next;IDX_RAW=ids;
     Object.entries(PENDING).forEach(([t,p])=>{if(!p.del)items[t]=Object.assign({},items[t],{byName:STAFF.name||STAFF.email});});
     return;
   }
-  if(ON_WEB)throw {code:"not_writer"};
-  return publishFiles({"overrides.json":{content:JSON.stringify({v:1,items}),contentType:"application/json"}});
+  throw {code:"not_writer"};
 }
 function fbErr(e){const c=e&&(e.code||"");
   if(/wrong-password|invalid-credential|invalid-login|user-not-found/.test(c))return "البريد أو كلمة المرور غير صحيحة.";
@@ -1950,7 +1891,6 @@ async function loadVoicePack(){
 }
 
 route();
-initData();
 initFirebase();
 loadVoicePack();
 })();
